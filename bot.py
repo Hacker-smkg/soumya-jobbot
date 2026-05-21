@@ -168,6 +168,7 @@ async def send_heartbeat():
 async def check_jobs():
     log.info("Checking for new jobs...")
     first_run = not os.path.exists(SEEN_FILE)
+    force_heartbeat = os.environ.get("SEND_HEARTBEAT") == "true"
     seen     = load_seen()
     all_jobs = fetch_remotive() + fetch_arbeitnow() + fetch_hn() + fetch_wellfound()
     log.info(f"Fetched {len(all_jobs)} total from all sources")
@@ -181,11 +182,15 @@ async def check_jobs():
     if first_run and os.environ.get("ALERT_ON_FIRST_RUN") != "true":
         log.info(f"Bootstrapped {len(new_jobs)} relevant existing jobs")
         await send_heartbeat()
-    elif new_jobs:
-        log.info(f"✅ {len(new_jobs)} new relevant jobs — alerting Soumya")
-        await send_alert(new_jobs)
     else:
-        log.info("No new jobs this run")
+        if force_heartbeat:
+            log.info("Sending requested heartbeat")
+            await send_heartbeat()
+        if new_jobs:
+            log.info(f"✅ {len(new_jobs)} new relevant jobs — alerting Soumya")
+            await send_alert(new_jobs)
+        elif not force_heartbeat:
+            log.info("No new jobs this run")
 
 def run_check():
     asyncio.run(check_jobs())
