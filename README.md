@@ -1,11 +1,12 @@
 # Soumya JobBot 🤖
 
-Telegram job alert bot — pings Soumya within 5 minutes of new SDE,
-software engineer, fresher, entry-level, intern, remote, and India-specific roles.
+Telegram job alert bot for Soumya in Kalyani/Kolkata, West Bengal. It pings
+within 5 minutes for SDE, software engineer, fresher, entry-level, intern,
+GenAI, remote-from-India, and India startup/HR hiring leads.
 
 ## Run on GitHub Actions (free)
 
-This bot runs every 5 minutes with GitHub Actions and sends Telegram alerts from 7 sources.
+This bot runs every 5 minutes with GitHub Actions and sends classified Telegram alerts.
 
 1. Add repository secrets:
    - TELEGRAM_TOKEN
@@ -13,7 +14,8 @@ This bot runs every 5 minutes with GitHub Actions and sends Telegram alerts from
 2. Enable Actions for the repo.
 3. The workflow in `.github/workflows/jobbot.yml` runs automatically every 5 minutes.
 
-The first run bootstraps existing jobs. Later runs only alert for new matching jobs.
+Alerts are grouped as Kolkata/West Bengal, India fresher/intern, remote from India,
+and startup/HR leads. Later runs only alert for new matching jobs.
 
 ## Sources monitored
 
@@ -24,6 +26,9 @@ The first run bootstraps existing jobs. Later runs only alert for new matching j
 - RemoteOK
 - Internshala
 - SimplifyJobs
+- Himalayas
+- DailyTechRoles
+- GradWorks
 
 ## Optional Render Deploy
 
