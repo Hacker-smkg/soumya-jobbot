@@ -264,7 +264,7 @@ async def send_update():
               "New keywords added:\n"
               "• SDE / Software Engineer Intern\n"
               "• Fresher / Entry Level / Junior\n"
-              "• All remote + India roles\n"
+              "• All remote \\+ India roles\n"
               "• Java, Spring Boot, Cloud, Data Science"),
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -289,12 +289,16 @@ async def check_jobs():
         if job["id"] not in seen and is_relevant(job):
             new_jobs.append(job)
             seen.add(job["id"])
-    save_seen(seen)
     log.info(f"New matching: {len(new_jobs)}")
-    if send_v2_update or first_run:
-        await send_update()
-    if new_jobs:
-        await send_alert(new_jobs)
+    try:
+        if send_v2_update or first_run:
+            await send_update()
+        if new_jobs:
+            await send_alert(new_jobs)
+    except Exception:
+        log.exception("Telegram send failed; leaving jobs unseen for a retry")
+        raise
+    save_seen(seen)
 
 def run_check():
     asyncio.run(check_jobs())
