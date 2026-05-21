@@ -1,5 +1,6 @@
-import os, json, time, logging, hashlib, requests, asyncio, schedule
+import os, json, logging, hashlib, requests, asyncio
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from telegram import Bot
 from telegram.constants import ParseMode
 
@@ -12,9 +13,10 @@ def require_env(name):
         raise RuntimeError(f"{name} must be set")
     return value
 
-TELEGRAM_TOKEN   = require_env("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = require_env("TELEGRAM_CHAT_ID")
 SEEN_FILE = "seen_jobs.json"
+IST = ZoneInfo("Asia/Kolkata")
 
 KEYWORDS = [
     "node.js","nodejs","mern","fastapi","langchain","genai","gen ai",
@@ -36,7 +38,7 @@ def load_seen():
     except Exception: return set()
 
 def save_seen(seen):
-    with open(SEEN_FILE,"w") as f: json.dump(list(seen)[-3000:], f)
+    with open(SEEN_FILE,"w") as f: json.dump(sorted(seen)[-3000:], f, indent=2)
 
 def jid(url): return hashlib.md5(url.encode()).hexdigest()
 
@@ -125,7 +127,7 @@ async def send_alert(new_jobs):
         chat_id=TELEGRAM_CHAT_ID,
         text=(f"🔥 *{len(new_jobs)} NEW JOB{'S' if len(new_jobs)>1 else ''} DETECTED*\n"
               f"_{len(easy)} Easy Apply · {len(norm)} Normal_\n"
-              f"🕐 {datetime.now().strftime('%d %b %Y, %I:%M %p')} IST\n"),
+              f"🕐 {datetime.now(IST).strftime('%d %b %Y, %I:%M %p')} IST\n"),
         parse_mode=ParseMode.MARKDOWN
     )
     for j in sorted(new_jobs, key=lambda x: x["easy"], reverse=True)[:8]:
@@ -165,6 +167,7 @@ async def send_heartbeat():
 # ── Main loop ─────────────────────────────────────────────────────
 async def check_jobs():
     log.info("Checking for new jobs...")
+    first_run = not os.path.exists(SEEN_FILE)
     seen     = load_seen()
     all_jobs = fetch_remotive() + fetch_arbeitnow() + fetch_hn() + fetch_wellfound()
     log.info(f"Fetched {len(all_jobs)} total from all sources")
@@ -174,7 +177,11 @@ async def check_jobs():
             new_jobs.append(job)
             seen.add(job["id"])
     save_seen(seen)
-    if new_jobs:
+
+    if first_run and os.environ.get("ALERT_ON_FIRST_RUN") != "true":
+        log.info(f"Bootstrapped {len(new_jobs)} relevant existing jobs")
+        await send_heartbeat()
+    elif new_jobs:
         log.info(f"✅ {len(new_jobs)} new relevant jobs — alerting Soumya")
         await send_alert(new_jobs)
     else:
@@ -184,11 +191,5 @@ def run_check():
     asyncio.run(check_jobs())
 
 if __name__ == "__main__":
-    log.info("🚀 Soumya JobBot starting...")
-    asyncio.run(send_heartbeat())
+    log.info("🚀 Soumya JobBot check starting...")
     run_check()
-    schedule.every(5).minutes.do(run_check)
-    log.info("✅ Scheduler running — checking every 5 minutes")
-    while True:
-        schedule.run_pending()
-        time.sleep(30)

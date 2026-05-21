@@ -1,7 +1,6 @@
 .env
 .env.*
 !.env.example
-seen_jobs.json
 __pycache__/
 *.py[cod]
 .DS_Store

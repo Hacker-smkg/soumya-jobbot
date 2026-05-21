@@ -3,7 +3,19 @@
 Telegram job alert bot — pings Soumya within 5 minutes of any new
 Node.js / MERN / GenAI / FastAPI / Backend intern posting.
 
-## Deploy to Render (free, 24/7)
+## Run on GitHub Actions (free)
+
+This bot runs every 5 minutes with GitHub Actions and sends Telegram alerts.
+
+1. Add repository secrets:
+   - TELEGRAM_TOKEN
+   - TELEGRAM_CHAT_ID
+2. Enable Actions for the repo.
+3. The workflow in `.github/workflows/jobbot.yml` runs automatically every 5 minutes.
+
+The first run bootstraps existing jobs and sends a live message. Later runs only alert for new matching jobs.
+
+## Deploy to Render
 
 1. Fork or push this repo to your GitHub
 2. Go to render.com → New → Background Worker
