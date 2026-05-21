@@ -5,8 +5,8 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
-      send_heartbeat:
-        description: "Send the live Telegram status message"
+      send_v2_update:
+        description: "Send the v2 Telegram update message"
         required: false
         default: "false"
 
@@ -38,7 +38,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SEND_HEARTBEAT: ${{ inputs.send_heartbeat || 'false' }}
+          SEND_V2_UPDATE: ${{ inputs.send_v2_update || 'false' }}
         run: python bot.py
 
       - name: Persist seen jobs
