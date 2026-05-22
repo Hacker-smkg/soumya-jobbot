@@ -1,4 +1,4 @@
-import os, json, logging, hashlib, requests, asyncio, html, re
+import os, json, logging, hashlib, requests, asyncio, html, re, base64, hmac
 from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -27,6 +27,7 @@ TELEGRAM_CHAT_IDS = parse_chat_ids(os.environ.get("TELEGRAM_CHAT_IDS")) or [TELE
 if TELEGRAM_CHAT_ID not in TELEGRAM_CHAT_IDS:
     TELEGRAM_CHAT_IDS.insert(0, TELEGRAM_CHAT_ID)
 SEEN_FILE = "seen_jobs.json"
+SUBSCRIBERS_FILE = "subscribers.enc.json"
 IST = ZoneInfo("Asia/Kolkata")
 USER_LOCATION = "Kalyani, Kolkata, West Bengal"
 
@@ -139,6 +140,101 @@ def save_seen(seen):
     with open(SEEN_FILE,"w") as f: json.dump(sorted(seen)[-5000:], f, indent=2)
 
 def jid(url): return hashlib.md5(url.encode()).hexdigest()
+
+def subscriber_key():
+    return hashlib.sha256((TELEGRAM_TOKEN + ":jobbot-subscribers:v1").encode()).digest()
+
+def xor_stream(key, nonce, data):
+    stream = bytearray()
+    counter = 0
+    while len(stream) < len(data):
+        stream.extend(hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest())
+        counter += 1
+    return bytes(byte ^ mask for byte, mask in zip(data, stream))
+
+def load_subscriber_state():
+    try:
+        with open(SUBSCRIBERS_FILE) as f:
+            payload = json.load(f)
+        key = subscriber_key()
+        nonce = base64.b64decode(payload["nonce"])
+        ciphertext = base64.b64decode(payload["ciphertext"])
+        tag = base64.b64decode(payload["tag"])
+        expected = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+        if not hmac.compare_digest(tag, expected):
+            raise ValueError("subscriber state authentication failed")
+        state = json.loads(xor_stream(key, nonce, ciphertext).decode())
+        return {
+            "chat_ids": parse_chat_ids(",".join(str(v) for v in state.get("chat_ids", []))),
+            "last_update_id": int(state.get("last_update_id", 0) or 0),
+        }
+    except FileNotFoundError:
+        return {"chat_ids": [], "last_update_id": 0}
+    except Exception as e:
+        log.warning(f"Subscriber state ignored: {e}")
+        return {"chat_ids": [], "last_update_id": 0}
+
+def save_subscriber_state(state):
+    raw = json.dumps({
+        "chat_ids": parse_chat_ids(",".join(state.get("chat_ids", []))),
+        "last_update_id": int(state.get("last_update_id", 0) or 0),
+    }, separators=(",", ":")).encode()
+    key = subscriber_key()
+    nonce = os.urandom(16)
+    ciphertext = xor_stream(key, nonce, raw)
+    tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+    with open(SUBSCRIBERS_FILE, "w") as f:
+        json.dump({
+            "version": 1,
+            "nonce": base64.b64encode(nonce).decode(),
+            "ciphertext": base64.b64encode(ciphertext).decode(),
+            "tag": base64.b64encode(tag).decode(),
+        }, f, indent=2)
+
+def chat_from_update(update):
+    for key in ("message", "edited_message", "channel_post"):
+        chat = (update.get(key) or {}).get("chat")
+        if chat and chat.get("id") is not None:
+            return str(chat["id"]), (update.get(key) or {}).get("text", "")
+    return "", ""
+
+def discover_subscribers():
+    state = load_subscriber_state()
+    known = parse_chat_ids(",".join(TELEGRAM_CHAT_IDS + state.get("chat_ids", [])))
+    last_update_id = int(state.get("last_update_id", 0) or 0)
+    initial_known = list(known)
+    initial_last_update_id = last_update_id
+    added = []
+
+    try:
+        params = {"limit": 100, "timeout": 0}
+        if last_update_id:
+            params["offset"] = last_update_id + 1
+        data = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+            params=params, timeout=15
+        ).json()
+        if not data.get("ok"):
+            raise RuntimeError(data)
+
+        for update in data.get("result", []):
+            last_update_id = max(last_update_id, int(update.get("update_id", 0) or 0))
+            chat_id, text = chat_from_update(update)
+            if not chat_id:
+                continue
+            if text and text.strip().lower().startswith("/stop"):
+                known = [item for item in known if item != chat_id or item == TELEGRAM_CHAT_ID]
+                continue
+            if chat_id not in known:
+                known.append(chat_id)
+                added.append(chat_id)
+    except Exception as e:
+        log.warning(f"Subscriber discovery skipped: {e}")
+
+    if known != initial_known or last_update_id != initial_last_update_id:
+        save_subscriber_state({"chat_ids": known, "last_update_id": last_update_id})
+    log.info(f"Active Telegram subscriber(s): {len(known)}")
+    return known, added
 
 def term_in_text(text, term):
     if re.fullmatch(r"[a-z0-9]+", term):
@@ -519,7 +615,7 @@ async def safe_send_message(bot, chat_id, **kwargs):
         log.warning(f"Telegram send failed for one subscriber: {e}")
         return False
 
-async def send_alert(new_jobs):
+async def send_alert(new_jobs, chat_ids):
     bot  = Bot(token=TELEGRAM_TOKEN)
     easy = [j for j in new_jobs if j["easy"]]
     norm = [j for j in new_jobs if not j["easy"]]
@@ -527,8 +623,9 @@ async def send_alert(new_jobs):
     bucket_summary = " · ".join(f"{count} {bucket}" for bucket, count in bucket_counts.most_common())
 
     jobs_to_send = sorted(new_jobs, key=lambda x: (x.get("priority", 0), x["easy"]), reverse=True)[:12]
-    log.info(f"Sending alerts to {len(TELEGRAM_CHAT_IDS)} subscriber(s)")
-    for chat_id in TELEGRAM_CHAT_IDS:
+    any_sent = False
+    log.info(f"Sending alerts to {len(chat_ids)} subscriber(s)")
+    for chat_id in chat_ids:
         header_sent = await safe_send_message(
             bot,
             chat_id,
@@ -541,6 +638,7 @@ async def send_alert(new_jobs):
         )
         if not header_sent:
             continue
+        any_sent = True
         for j in jobs_to_send:
             badge = "⚡ EASY APPLY" if j["easy"] else "📋 Apply"
             domains = ", ".join(j.get("domains") or ["Tech"])
@@ -560,11 +658,13 @@ async def send_alert(new_jobs):
                 disable_web_page_preview=False
             )
             await asyncio.sleep(0.5)
+    return any_sent
 
-async def send_update():
+async def send_update(chat_ids):
     bot = Bot(token=TELEGRAM_TOKEN)
-    for chat_id in TELEGRAM_CHAT_IDS:
-        await safe_send_message(
+    any_sent = False
+    for chat_id in chat_ids:
+        sent = await safe_send_message(
             bot,
             chat_id,
             text=(f"🔄 <b>JobBot UPDATED to v3</b>\n\n"
@@ -581,6 +681,20 @@ async def send_update():
                   "Better filtering for GenAI, Backend, MERN, Python/ML, DevOps, Java/Spring."),
             parse_mode=ParseMode.HTML
         )
+        any_sent = any_sent or sent
+    return any_sent
+
+async def send_welcome(chat_ids):
+    bot = Bot(token=TELEGRAM_TOKEN)
+    for chat_id in chat_ids:
+        await safe_send_message(
+            bot,
+            chat_id,
+            text=("✅ <b>You are subscribed to Soumya JobBot</b>\n\n"
+                  "You will receive classified job alerts when new matching roles are found.\n"
+                  "Send /stop to unsubscribe."),
+            parse_mode=ParseMode.HTML
+        )
 
 async def check_jobs():
     log.info("--- Checking all sources ---")
@@ -589,6 +703,7 @@ async def check_jobs():
         os.environ.get("SEND_UPDATE") == "true"
         or os.environ.get("SEND_V2_UPDATE") == "true"
     )
+    chat_ids, new_subscribers = discover_subscribers()
     seen = load_seen()
     all_jobs = (
         fetch_remotive()   +
@@ -610,10 +725,13 @@ async def check_jobs():
             seen.add(job["id"])
     log.info(f"New matching: {len(new_jobs)}")
     try:
+        if new_subscribers:
+            await send_welcome(new_subscribers)
         if send_update_requested or first_run:
-            await send_update()
+            await send_update(chat_ids)
         if new_jobs:
-            await send_alert(new_jobs)
+            if not await send_alert(new_jobs, chat_ids):
+                raise RuntimeError("No Telegram subscribers accepted job alerts")
     except Exception:
         log.exception("Telegram send failed; leaving jobs unseen for a retry")
         raise

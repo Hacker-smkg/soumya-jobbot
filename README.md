@@ -23,7 +23,8 @@ and startup/HR leads. Later runs only alert for new matching jobs.
 ## Multiple Telegram Subscribers
 
 The default `TELEGRAM_CHAT_ID` receives all alerts. To send alerts to friends too,
-add a GitHub secret named `TELEGRAM_CHAT_IDS`:
+either ask them to send `/start` to the bot or add a GitHub secret named
+`TELEGRAM_CHAT_IDS`:
 
 ```text
 your_chat_id,friend_chat_id,another_friend_chat_id
@@ -31,6 +32,10 @@ your_chat_id,friend_chat_id,another_friend_chat_id
 
 Each friend must open the Telegram bot and press Start once before Telegram allows
 the bot to send them messages.
+
+The bot auto-detects new `/start` messages during each scheduled run and stores
+subscriber state in `subscribers.enc.json`. That file is encrypted with the
+Telegram token secret, so chat IDs are not committed in plain text.
 
 ## Sources monitored
 
