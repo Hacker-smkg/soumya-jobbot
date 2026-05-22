@@ -1,9 +1,6 @@
 name: JobBot
 
 on:
-  schedule:
-    # Offset from crowded :00/:05 boundaries so GitHub is less likely to delay/drop runs.
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
   workflow_dispatch:
     inputs:
       send_update:
