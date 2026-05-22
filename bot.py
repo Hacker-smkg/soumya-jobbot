@@ -14,8 +14,18 @@ def require_env(name):
         raise RuntimeError(f"{name} must be set")
     return value
 
+def parse_chat_ids(value):
+    return list(dict.fromkeys(
+        chat_id.strip()
+        for chat_id in re.split(r"[,;\s]+", value or "")
+        if chat_id.strip()
+    ))
+
 TELEGRAM_TOKEN = require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = require_env("TELEGRAM_CHAT_ID")
+TELEGRAM_CHAT_IDS = parse_chat_ids(os.environ.get("TELEGRAM_CHAT_IDS")) or [TELEGRAM_CHAT_ID]
+if TELEGRAM_CHAT_ID not in TELEGRAM_CHAT_IDS:
+    TELEGRAM_CHAT_IDS.insert(0, TELEGRAM_CHAT_ID)
 SEEN_FILE = "seen_jobs.json"
 IST = ZoneInfo("Asia/Kolkata")
 USER_LOCATION = "Kalyani, Kolkata, West Bengal"
@@ -501,6 +511,14 @@ def fetch_gradworks():
     return jobs[:60]
 
 # ── Telegram alerts ──────────────────────────────────────────────
+async def safe_send_message(bot, chat_id, **kwargs):
+    try:
+        await bot.send_message(chat_id=chat_id, **kwargs)
+        return True
+    except Exception as e:
+        log.warning(f"Telegram send failed for one subscriber: {e}")
+        return False
+
 async def send_alert(new_jobs):
     bot  = Bot(token=TELEGRAM_TOKEN)
     easy = [j for j in new_jobs if j["easy"]]
@@ -508,21 +526,27 @@ async def send_alert(new_jobs):
     bucket_counts = Counter(j.get("bucket", "Tech role") for j in new_jobs)
     bucket_summary = " · ".join(f"{count} {bucket}" for bucket, count in bucket_counts.most_common())
 
-    await bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text=(f"🔥 <b>{len(new_jobs)} NEW JOB{'S' if len(new_jobs)>1 else ''} FOUND</b>\n"
-              f"<i>{len(easy)} Easy Apply · {len(norm)} Normal</i>\n"
-              f"🧭 {html.escape(bucket_summary)}\n"
-              f"📍 Optimized for {html.escape(USER_LOCATION)}\n"
-              f"🕐 {datetime.now(IST).strftime('%d %b %Y, %I:%M %p')} IST"),
-        parse_mode=ParseMode.HTML
-    )
-    for j in sorted(new_jobs, key=lambda x: (x.get("priority", 0), x["easy"]), reverse=True)[:12]:
-        badge = "⚡ EASY APPLY" if j["easy"] else "📋 Apply"
-        domains = ", ".join(j.get("domains") or ["Tech"])
-        try:
-            await bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
+    jobs_to_send = sorted(new_jobs, key=lambda x: (x.get("priority", 0), x["easy"]), reverse=True)[:12]
+    log.info(f"Sending alerts to {len(TELEGRAM_CHAT_IDS)} subscriber(s)")
+    for chat_id in TELEGRAM_CHAT_IDS:
+        header_sent = await safe_send_message(
+            bot,
+            chat_id,
+            text=(f"🔥 <b>{len(new_jobs)} NEW JOB{'S' if len(new_jobs)>1 else ''} FOUND</b>\n"
+                  f"<i>{len(easy)} Easy Apply · {len(norm)} Normal</i>\n"
+                  f"🧭 {html.escape(bucket_summary)}\n"
+                  f"📍 Optimized for {html.escape(USER_LOCATION)}\n"
+                  f"🕐 {datetime.now(IST).strftime('%d %b %Y, %I:%M %p')} IST"),
+            parse_mode=ParseMode.HTML
+        )
+        if not header_sent:
+            continue
+        for j in jobs_to_send:
+            badge = "⚡ EASY APPLY" if j["easy"] else "📋 Apply"
+            domains = ", ".join(j.get("domains") or ["Tech"])
+            await safe_send_message(
+                bot,
+                chat_id,
                 text=(f"{badge}\n\n"
                       f"🎯 <b>{html.escape(j['title'])}</b>\n"
                       f"🏢 {html.escape(j['company'] or 'Unknown')}\n"
@@ -536,26 +560,27 @@ async def send_alert(new_jobs):
                 disable_web_page_preview=False
             )
             await asyncio.sleep(0.5)
-        except Exception as e: log.warning(f"Send failed: {e}")
 
 async def send_update():
     bot = Bot(token=TELEGRAM_TOKEN)
-    await bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text=(f"🔄 <b>JobBot UPDATED to v3</b>\n\n"
-              f"Optimized for <b>{html.escape(USER_LOCATION)}</b>.\n\n"
-              "Now classifying jobs into:\n"
-              "• Kolkata / West Bengal nearby\n"
-              "• India fresher / intern\n"
-              "• Global remote workable from India\n"
-              "• Startup / HR / contract hiring leads\n\n"
-              "New sources added:\n"
-              "• Himalayas remote jobs API\n"
-              "• DailyTechRoles India fresher roles\n"
-              "• GradWorks India internships and entry-level jobs\n\n"
-              "Better filtering for GenAI, Backend, MERN, Python/ML, DevOps, Java/Spring."),
-        parse_mode=ParseMode.HTML
-    )
+    for chat_id in TELEGRAM_CHAT_IDS:
+        await safe_send_message(
+            bot,
+            chat_id,
+            text=(f"🔄 <b>JobBot UPDATED to v3</b>\n\n"
+                  f"Optimized for <b>{html.escape(USER_LOCATION)}</b>.\n\n"
+                  "Now classifying jobs into:\n"
+                  "• Kolkata / West Bengal nearby\n"
+                  "• India fresher / intern\n"
+                  "• Global remote workable from India\n"
+                  "• Startup / HR / contract hiring leads\n\n"
+                  "New sources added:\n"
+                  "• Himalayas remote jobs API\n"
+                  "• DailyTechRoles India fresher roles\n"
+                  "• GradWorks India internships and entry-level jobs\n\n"
+                  "Better filtering for GenAI, Backend, MERN, Python/ML, DevOps, Java/Spring."),
+            parse_mode=ParseMode.HTML
+        )
 
 async def check_jobs():
     log.info("--- Checking all sources ---")
