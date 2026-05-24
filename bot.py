@@ -630,14 +630,21 @@ def fetch_gradworks():
 def fetch_hasjob():
     jobs = []
     try:
-        xml_text = requests.get("https://hasjob.co/feed", timeout=15, headers=HEADERS).text
-        for entry in re.findall(r"<entry>(.*?)</entry>", xml_text, flags=re.S):
-            title_match = re.search(r"<title[^>]*>(.*?)</title>", entry, flags=re.S)
-            link_match = re.search(r'<link[^>]*href="([^"]+)"', entry)
-            id_match = re.search(r"<id>(.*?)</id>", entry, flags=re.S)
-            loc_match = re.search(r"<location>(.*?)</location>", entry, flags=re.S)
-            content_match = re.search(r"<content[^>]*>(.*?)</content>", entry, flags=re.S)
-            published_match = re.search(r"<published>(.*?)</published>", entry, flags=re.S)
+        response = requests.get("https://hasjob.co/feed", timeout=15, headers=HEADERS)
+        if response.status_code != 200:
+            log.warning(f"Hasjob: HTTP {response.status_code}")
+            return jobs
+        xml_text = response.text
+        entries = re.findall(r"<(?:\w+:)?entry\b[^>]*>(.*?)</(?:\w+:)?entry>", xml_text, flags=re.S)
+        if not entries:
+            log.warning(f"Hasjob: no feed entries in {len(xml_text)} chars")
+        for entry in entries:
+            title_match = re.search(r"<(?:\w+:)?title\b[^>]*>(.*?)</(?:\w+:)?title>", entry, flags=re.S)
+            link_match = re.search(r'<(?:\w+:)?link\b[^>]*href="([^"]+)"', entry)
+            id_match = re.search(r"<(?:\w+:)?id\b[^>]*>(.*?)</(?:\w+:)?id>", entry, flags=re.S)
+            loc_match = re.search(r"<(?:\w+:)?location\b[^>]*>(.*?)</(?:\w+:)?location>", entry, flags=re.S)
+            content_match = re.search(r"<(?:\w+:)?content\b[^>]*>(.*?)</(?:\w+:)?content>", entry, flags=re.S)
+            published_match = re.search(r"<(?:\w+:)?published\b[^>]*>(.*?)</(?:\w+:)?published>", entry, flags=re.S)
             title = clean_html(html.unescape(title_match.group(1))) if title_match else ""
             url = link_match.group(1).strip() if link_match else clean_html(id_match.group(1)) if id_match else ""
             if not title or not url:
