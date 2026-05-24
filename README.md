@@ -49,6 +49,14 @@ Telegram token secret, so chat IDs are not committed in plain text.
 - Himalayas
 - DailyTechRoles
 - GradWorks
+- Hasjob
+- Remote First Jobs
+- RemoteJobs.org
+- Working Nomads
+- We Work Remotely
+- NoDesk
+- Python.org Jobs
+- Physical AI Jobs
 
 ## Optional Render Deploy
 

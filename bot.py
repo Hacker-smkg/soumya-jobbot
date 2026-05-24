@@ -1,4 +1,5 @@
 import os, json, logging, hashlib, requests, asyncio, html, re, base64, hmac
+import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -130,6 +131,12 @@ EXPERIENCE_BLOCK_RE = re.compile(
 TITLE_BLOCK_RE = re.compile(r"\b(?:senior|sr\.?|principal|staff|lead|manager|director|architect|head|vp)\b", re.I)
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
+TECH_SOURCE_TERMS = [
+    "software", "developer", "developers", "development", "engineer", "backend", "frontend",
+    "full stack", "fullstack", "web", "programmer", "sde",
+    "python", "java", "javascript", "typescript", "react", "node", "api", "devops",
+    "cloud", "data", "machine learning", "ai", "ml", "llm", "genai", "fastapi",
+]
 
 def load_seen():
     try:
@@ -294,10 +301,10 @@ def enrich_job(job):
         return None
 
     domains = classify_domains(text)
-    india = has_india_signal(text) or job["source"].startswith(("Internshala", "GradWorks", "DailyTechRoles"))
+    india = has_india_signal(text) or job["source"].startswith(("Internshala", "GradWorks", "DailyTechRoles", "Hasjob"))
     nearby = has_nearby_signal(text)
     remote_india = is_remote_workable_from_india(job, text)
-    startup_signal = has_startup_hr_signal(text) or job["source"].startswith(("HackerNews", "DailyTechRoles"))
+    startup_signal = has_startup_hr_signal(text) or job["source"].startswith(("HackerNews", "DailyTechRoles", "Hasjob"))
     startup_hr = startup_signal and (india or remote_india)
     entry = has_entry_signal(text)
     full_time = has_full_time_signal(text) or "engineer" in job["title"].lower() or "developer" in job["title"].lower()
@@ -350,6 +357,19 @@ def clean_html(value):
 
 def html_link(url, label):
     return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+
+def parse_rss_items(xml_text):
+    root = ET.fromstring(xml_text)
+    for item in root.findall(".//item"):
+        yield item
+
+def rss_item_text(item, tag):
+    found = item.find(tag)
+    return found.text.strip() if found is not None and found.text else ""
+
+def first_rss_link(item):
+    link = rss_item_text(item, "link")
+    return link.strip()
 
 # ── Source 1: Remotive ────────────────────────────────────────────
 def fetch_remotive():
@@ -606,6 +626,259 @@ def fetch_gradworks():
     except Exception as e: log.warning(f"GradWorks: {e}")
     return jobs[:60]
 
+# ── Source 11: Hasjob India startup jobs ─────────────────────────
+def fetch_hasjob():
+    jobs = []
+    try:
+        page = requests.get("https://hasjob.co/", timeout=15, headers=HEADERS).text
+        for block in re.findall(r'<a class="stickie".*?</a>', page, flags=re.S):
+            href_match = re.search(r'(?:data-href|href)="([^"]+)"', block)
+            title_match = re.search(r'<span class="headline">(.*?)</span>', block, flags=re.S)
+            company_match = re.search(r'<span class="annotation company-name">(.*?)</span>', block, flags=re.S)
+            loc_match = re.search(r'<span class="annotation top-left">(.*?)</span>', block, flags=re.S)
+            date_match = re.search(r'<span class="annotation top-right">(.*?)</span>', block, flags=re.S)
+            if not href_match or not title_match:
+                continue
+            url = href_match.group(1)
+            if url.startswith("/"):
+                url = "https://hasjob.co" + url
+            title = clean_html(title_match.group(1))
+            company = clean_html(company_match.group(1)) if company_match else "Hasjob startup"
+            loc = clean_html(loc_match.group(1)) if loc_match else "India / Remote"
+            posted = clean_html(date_match.group(1)) if date_match else ""
+            text = f"{title} {company} {loc} india startup".lower()
+            if not contains_any(text, TECH_SOURCE_TERMS):
+                continue
+            jobs.append(make_job(jid(url), title, company, url, f"📍 {loc}",
+                "Hasjob 🇮🇳", True, text, posted))
+        log.info(f"Hasjob: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"Hasjob: {e}")
+    return jobs[:40]
+
+# ── Source 12: Remote First Jobs public API ──────────────────────
+def fetch_remotefirst():
+    jobs = []
+    seen_urls = set()
+    requests_to_make = [
+        {"category": "software-development", "page": 0},
+        {"category": "data", "page": 0},
+        {"category": "devops-and-sre", "page": 0},
+        {"query": "python", "page": 0},
+        {"query": "react", "page": 0},
+        {"query": "gen ai", "page": 0},
+        {"query": "intern", "page": 0},
+    ]
+    try:
+        for params in requests_to_make:
+            data = requests.get("https://remotefirstjobs.com/api/search-jobs",
+                params=params, timeout=15, headers=HEADERS).json()
+            for j in data.get("jobs", []):
+                url = j.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                locs = [str(v) for v in (j.get("locations") or []) if v]
+                loc = "🌐 Remote"
+                if locs:
+                    loc = "🌐 Remote: " + ", ".join(locs[:4])
+                seniority = j.get("seniority") or ""
+                text = clean_html(
+                    f"{j.get('title','')} {j.get('company_name','')} {j.get('description','')} "
+                    f"{j.get('category','')} {seniority} {' '.join(locs)}"
+                ).lower()
+                jobs.append(make_job(jid(url), j.get("title",""), j.get("company_name",""),
+                    url, loc, "Remote First Jobs 🛰️", True, text, str(j.get("published_at",""))[:10],
+                    location_restrictions=locs, remote_first_credit=True))
+        log.info(f"RemoteFirstJobs: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"RemoteFirstJobs: {e}")
+    return jobs[:80]
+
+# ── Source 13: RemoteJobs.org public API ─────────────────────────
+def fetch_remotejobs_org():
+    jobs = []
+    seen_urls = set()
+    params_list = [
+        {"category": "programming", "limit": 50},
+        {"category": "devops", "limit": 50},
+        {"category": "data-science", "limit": 50},
+        {"q": "python", "limit": 50},
+        {"q": "react", "limit": 50},
+        {"q": "backend", "limit": 50},
+        {"q": "ai", "limit": 50},
+    ]
+    try:
+        for params in params_list:
+            try:
+                response = requests.get("https://remotejobs.org/api/v1/jobs",
+                    params=params, timeout=15, headers=HEADERS)
+                if response.status_code != 200:
+                    log.warning(f"RemoteJobs.org query {params}: HTTP {response.status_code}")
+                    if response.status_code == 429:
+                        break
+                    continue
+                data = response.json()
+            except Exception as e:
+                log.warning(f"RemoteJobs.org query {params}: {e}")
+                continue
+            for j in data.get("data", []):
+                url = j.get("apply_url") or j.get("url") or ""
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                company = (j.get("company") or {}).get("name", "")
+                loc = j.get("location") or "Remote"
+                category = (j.get("category") or {}).get("name", "")
+                text = clean_html(
+                    f"{j.get('title','')} {company} {j.get('description','')} "
+                    f"{category} {j.get('type','')} {loc}"
+                ).lower()
+                jobs.append(make_job(jid(url), j.get("title",""), company,
+                    url, f"🌐 {loc}", "RemoteJobs.org 🌍", True, text, str(j.get("posted_at",""))[:10],
+                    location_restrictions=[loc]))
+        log.info(f"RemoteJobs.org: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"RemoteJobs.org: {e}")
+    return jobs[:80]
+
+# ── Source 14: Working Nomads public jobs API ────────────────────
+def fetch_workingnomads():
+    jobs = []
+    try:
+        data = requests.get("https://www.workingnomads.com/api/exposed_jobs/",
+            timeout=15, headers=HEADERS).json()
+        for j in data:
+            title = j.get("title","")
+            company = j.get("company_name","")
+            loc = j.get("location","Remote")
+            category = j.get("category_name","")
+            tags = j.get("tags","")
+            description = j.get("description","")
+            text = clean_html(f"{title} {company} {loc} {category} {tags} {description}").lower()
+            if category.lower() != "development" and not contains_any(text, TECH_SOURCE_TERMS):
+                continue
+            url = j.get("url","")
+            jobs.append(make_job(jid(url), title, company, url, f"🌐 Remote: {loc}",
+                "Working Nomads 🧭", True, text, str(j.get("pub_date",""))[:10],
+                location_restrictions=[loc]))
+        log.info(f"WorkingNomads: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"WorkingNomads: {e}")
+    return jobs[:60]
+
+# ── Source 15: We Work Remotely programming RSS ─────────────────
+def fetch_weworkremotely():
+    jobs = []
+    try:
+        xml_text = requests.get("https://weworkremotely.com/categories/remote-programming-jobs.rss",
+            timeout=15, headers=HEADERS).text
+        for item in parse_rss_items(xml_text):
+            raw_title = clean_html(rss_item_text(item, "title"))
+            if not raw_title:
+                continue
+            company = "We Work Remotely"
+            title = raw_title
+            if ":" in raw_title:
+                company, title = [part.strip() for part in raw_title.split(":", 1)]
+            url = first_rss_link(item)
+            description = clean_html(rss_item_text(item, "description"))
+            posted = rss_item_text(item, "pubDate")[:16]
+            loc_match = re.search(r"(?:Region|Location):\s*([^<\n]+)", description, flags=re.I)
+            loc = clean_html(loc_match.group(1)) if loc_match else "Remote"
+            text = f"{title} {company} {description} {loc} worldwide anywhere global remote".lower()
+            jobs.append(make_job(jid(url), title, company, url, f"🌐 Remote: {loc}",
+                "WeWorkRemotely 🧑‍💻", True, text, posted,
+                location_restrictions=[loc]))
+        log.info(f"WeWorkRemotely: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"WeWorkRemotely: {e}")
+    return jobs[:50]
+
+# ── Source 16: NoDesk remote developer listings ─────────────────
+def fetch_nodesk():
+    jobs = []
+    seen_urls = set()
+    pages = [
+        "https://nodesk.co/remote-jobs/developer/",
+        "https://nodesk.co/remote-jobs/software-developer/",
+        "https://nodesk.co/remote-jobs/backend-developer/",
+        "https://nodesk.co/remote-jobs/frontend-developer/",
+    ]
+    try:
+        for page_url in pages:
+            page = requests.get(page_url, timeout=15, headers=HEADERS).text
+            for block in re.split(r'<li class="dt-s dt-ns', page)[1:]:
+                title_match = re.search(r'<h2[^>]*>.*?<a[^>]+href=["\']?([^"\' >]+)["\']?[^>]*>(.*?)</a>', block, flags=re.S)
+                if not title_match:
+                    continue
+                url = title_match.group(1)
+                if url.startswith("/"):
+                    url = "https://nodesk.co" + url
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                title = clean_html(title_match.group(2))
+                company_match = re.search(r'<h3[^>]*class="[^"]*grey-900[^"]*lh-copy[^"]*"[^>]*>(.*?)</h3>', block, flags=re.S)
+                logo_match = re.search(r'alt="([^"]+) logo"', block)
+                company = clean_html(company_match.group(1)) if company_match else ""
+                if not company and logo_match:
+                    company = clean_html(logo_match.group(1))
+                if not company:
+                    company = "NoDesk company"
+                remote_match = re.search(r'Remote:</h4>\s*<h5[^>]*>(.*?)</h5>', block, flags=re.S)
+                loc = clean_html(remote_match.group(1)) if remote_match else "Remote"
+                tags = " ".join(clean_html(tag) for tag in re.findall(r'<li class="dib.*?>(.*?)</li>', block, flags=re.S))
+                text = f"{title} {company} {loc} {tags} remote worldwide anywhere full-time developer engineer".lower()
+                jobs.append(make_job(jid(url), title, company, url, f"🌐 Remote: {loc}",
+                    "NoDesk 🌐", True, text, "",
+                    location_restrictions=[loc]))
+        log.info(f"NoDesk: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"NoDesk: {e}")
+    return jobs[:80]
+
+# ── Source 17: Python.org official jobs RSS ─────────────────────
+def fetch_python_org():
+    jobs = []
+    try:
+        xml_text = requests.get("https://www.python.org/jobs/feed/rss/",
+            timeout=15, headers=HEADERS).text
+        for item in parse_rss_items(xml_text):
+            raw_title = clean_html(rss_item_text(item, "title"))
+            if not raw_title:
+                continue
+            title = raw_title
+            company = "Python.org job board"
+            if ", " in raw_title:
+                title, company = [part.strip() for part in raw_title.rsplit(", ", 1)]
+            url = first_rss_link(item)
+            raw_description = rss_item_text(item, "description")
+            loc = clean_html(re.split(r"<p\b", raw_description, maxsplit=1, flags=re.I)[0]) or "Remote / Global"
+            description = clean_html(raw_description)
+            text = f"{title} {company} {description} {loc} python backend django flask fastapi ai ml remote".lower()
+            jobs.append(make_job(jid(url), title, company, url, f"🌐 {loc}",
+                "Python.org 🐍", True, text, rss_item_text(item, "pubDate")[:16],
+                location_restrictions=[loc]))
+        log.info(f"Python.org: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"Python.org: {e}")
+    return jobs[:50]
+
+# ── Source 18: Physical AI Jobs RSS ─────────────────────────────
+def fetch_physicalai():
+    jobs = []
+    try:
+        xml_text = requests.get("https://www.physicalai.jobs/jobs.rss",
+            timeout=15, headers=HEADERS).text
+        for item in parse_rss_items(xml_text):
+            title = clean_html(rss_item_text(item, "title"))
+            url = first_rss_link(item)
+            if not title or not url:
+                continue
+            path_parts = [part for part in url.split("/") if part]
+            company = path_parts[2].replace("-", " ").title() if len(path_parts) > 2 else "Physical AI company"
+            description = clean_html(rss_item_text(item, "description"))
+            text = f"{title} {company} {description} ai machine learning ml robotics computer vision autonomy".lower()
+            jobs.append(make_job(jid(url), title, company, url, "🤖 AI / Robotics",
+                "Physical AI Jobs 🤖", True, text, rss_item_text(item, "pubDate")[:16]))
+        log.info(f"PhysicalAI: {len(jobs)} fetched")
+    except Exception as e: log.warning(f"PhysicalAI: {e}")
+    return jobs[:50]
+
 # ── Telegram alerts ──────────────────────────────────────────────
 async def safe_send_message(bot, chat_id, **kwargs):
     try:
@@ -667,17 +940,22 @@ async def send_update(chat_ids):
         sent = await safe_send_message(
             bot,
             chat_id,
-            text=(f"🔄 <b>JobBot UPDATED to v3</b>\n\n"
+            text=(f"🔄 <b>JobBot UPDATED to v4</b>\n\n"
                   f"Optimized for <b>{html.escape(USER_LOCATION)}</b>.\n\n"
                   "Now classifying jobs into:\n"
                   "• Kolkata / West Bengal nearby\n"
                   "• India fresher / intern\n"
                   "• Global remote workable from India\n"
                   "• Startup / HR / contract hiring leads\n\n"
-                  "New sources added:\n"
-                  "• Himalayas remote jobs API\n"
-                  "• DailyTechRoles India fresher roles\n"
-                  "• GradWorks India internships and entry-level jobs\n\n"
+                  "Newer niche sources included:\n"
+                  "• Hasjob India startup jobs\n"
+                  "• Remote First Jobs public API\n"
+                  "• RemoteJobs.org public API\n"
+                  "• Working Nomads public API\n"
+                  "• We Work Remotely programming RSS\n"
+                  "• NoDesk worldwide developer jobs\n"
+                  "• Python.org jobs RSS\n"
+                  "• Physical AI Jobs RSS\n\n"
                   "Better filtering for GenAI, Backend, MERN, Python/ML, DevOps, Java/Spring."),
             parse_mode=ParseMode.HTML
         )
@@ -714,8 +992,16 @@ async def check_jobs():
         fetch_internshala()+
         fetch_simplify()   +
         fetch_himalayas()  +
-        fetch_dailytechroles()+
-        fetch_gradworks()
+        fetch_dailytechroles() +
+        fetch_gradworks()      +
+        fetch_hasjob()         +
+        fetch_remotefirst()    +
+        fetch_remotejobs_org() +
+        fetch_workingnomads()  +
+        fetch_weworkremotely() +
+        fetch_nodesk()         +
+        fetch_python_org()     +
+        fetch_physicalai()
     )
     log.info(f"Total fetched: {len(all_jobs)}")
     new_jobs = []
@@ -741,5 +1027,5 @@ def run_check():
     asyncio.run(check_jobs())
 
 if __name__ == "__main__":
-    log.info("🚀 JobBot v3 one-shot check starting")
+    log.info("🚀 JobBot v4 one-shot check starting")
     run_check()
