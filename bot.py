@@ -629,37 +629,56 @@ def fetch_gradworks():
 # ── Source 11: Hasjob India startup jobs ─────────────────────────
 def fetch_hasjob():
     jobs = []
+    seen_urls = set()
+
+    def add_hasjob_job(title, company, url, loc, posted="", description=""):
+        if not title or not url or url in seen_urls:
+            return
+        text = f"{title} {company} {loc} {description} india startup".lower()
+        if not contains_any(text, TECH_SOURCE_TERMS):
+            return
+        seen_urls.add(url)
+        jobs.append(make_job(jid(url), title, company or "Hasjob startup", url, f"📍 {loc}",
+            "Hasjob 🇮🇳", True, text, posted))
+
     try:
         response = requests.get("https://hasjob.co/feed", timeout=15, headers=HEADERS)
-        if response.status_code != 200:
-            log.warning(f"Hasjob: HTTP {response.status_code}")
-            return jobs
-        xml_text = response.text
-        entries = re.findall(r"<(?:\w+:)?entry\b[^>]*>(.*?)</(?:\w+:)?entry>", xml_text, flags=re.S)
-        if not entries:
-            log.warning(f"Hasjob: no feed entries in {len(xml_text)} chars")
-        for entry in entries:
-            title_match = re.search(r"<(?:\w+:)?title\b[^>]*>(.*?)</(?:\w+:)?title>", entry, flags=re.S)
-            link_match = re.search(r'<(?:\w+:)?link\b[^>]*href="([^"]+)"', entry)
-            id_match = re.search(r"<(?:\w+:)?id\b[^>]*>(.*?)</(?:\w+:)?id>", entry, flags=re.S)
-            loc_match = re.search(r"<(?:\w+:)?location\b[^>]*>(.*?)</(?:\w+:)?location>", entry, flags=re.S)
-            content_match = re.search(r"<(?:\w+:)?content\b[^>]*>(.*?)</(?:\w+:)?content>", entry, flags=re.S)
-            published_match = re.search(r"<(?:\w+:)?published\b[^>]*>(.*?)</(?:\w+:)?published>", entry, flags=re.S)
-            title = clean_html(html.unescape(title_match.group(1))) if title_match else ""
-            url = link_match.group(1).strip() if link_match else clean_html(id_match.group(1)) if id_match else ""
-            if not title or not url:
-                continue
-            loc = clean_html(html.unescape(loc_match.group(1))) if loc_match else "India / Remote"
-            content = html.unescape(content_match.group(1)) if content_match else ""
-            company_match = re.search(r"<strong>\s*<a[^>]*>(.*?)</a>", content, flags=re.S)
-            company = clean_html(company_match.group(1)) if company_match else "Hasjob startup"
-            description = clean_html(content)
-            posted = clean_html(published_match.group(1))[:10] if published_match else ""
-            text = f"{title} {company} {loc} {description} india startup".lower()
-            if not contains_any(text, TECH_SOURCE_TERMS):
-                continue
-            jobs.append(make_job(jid(url), title, company, url, f"📍 {loc}",
-                "Hasjob 🇮🇳", True, text, posted))
+        if response.status_code == 200:
+            xml_text = response.text
+            entries = re.findall(r"<(?:\w+:)?entry\b[^>]*>(.*?)</(?:\w+:)?entry>", xml_text, flags=re.S)
+            for entry in entries:
+                title_match = re.search(r"<(?:\w+:)?title\b[^>]*>(.*?)</(?:\w+:)?title>", entry, flags=re.S)
+                link_match = re.search(r'<(?:\w+:)?link\b[^>]*href="([^"]+)"', entry)
+                id_match = re.search(r"<(?:\w+:)?id\b[^>]*>(.*?)</(?:\w+:)?id>", entry, flags=re.S)
+                loc_match = re.search(r"<(?:\w+:)?location\b[^>]*>(.*?)</(?:\w+:)?location>", entry, flags=re.S)
+                content_match = re.search(r"<(?:\w+:)?content\b[^>]*>(.*?)</(?:\w+:)?content>", entry, flags=re.S)
+                published_match = re.search(r"<(?:\w+:)?published\b[^>]*>(.*?)</(?:\w+:)?published>", entry, flags=re.S)
+                title = clean_html(html.unescape(title_match.group(1))) if title_match else ""
+                url = link_match.group(1).strip() if link_match else clean_html(id_match.group(1)) if id_match else ""
+                loc = clean_html(html.unescape(loc_match.group(1))) if loc_match else "India / Remote"
+                content = html.unescape(content_match.group(1)) if content_match else ""
+                company_match = re.search(r"<strong>\s*<a[^>]*>(.*?)</a>", content, flags=re.S)
+                company = clean_html(company_match.group(1)) if company_match else "Hasjob startup"
+                posted = clean_html(published_match.group(1))[:10] if published_match else ""
+                add_hasjob_job(title, company, url, loc, posted, clean_html(content))
+        else:
+            log.info(f"Hasjob feed HTTP {response.status_code}; using reader fallback")
+
+        if not jobs:
+            page = requests.get("https://r.jina.ai/https://hasjob.co/",
+                timeout=20, headers=HEADERS).text
+            for body, url in re.findall(r"^\*\s+\[(.*?)\]\((https://hasjob\.co/[^)]+)\)", page, flags=re.M):
+                date_match = re.search(r"\b(\d{1,2}\s+\w+\s+’\d{2})\b", body)
+                loc = "India / Remote"
+                title = clean_html(body)
+                posted = ""
+                if date_match:
+                    loc = clean_html(body[:date_match.start()]) or loc
+                    posted = date_match.group(1)
+                    title = clean_html(body[date_match.end():])
+                company_slug = url.rstrip("/").split("/")[-2] if len(url.rstrip("/").split("/")) > 3 else ""
+                company = company_slug.replace("-", " ").replace(".com", "").replace(".in", "").replace(".ai", "").title()
+                add_hasjob_job(title, company, url, loc, posted, title)
         log.info(f"Hasjob: {len(jobs)} fetched")
     except Exception as e: log.warning(f"Hasjob: {e}")
     return jobs[:40]
