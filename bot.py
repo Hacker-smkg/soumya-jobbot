@@ -363,25 +363,13 @@ def parse_rss_items(xml_text):
     for item in root.findall(".//item"):
         yield item
 
-def parse_atom_entries(xml_text):
-    root = ET.fromstring(xml_text)
-    yield from root.findall(".//{http://www.w3.org/2005/Atom}entry")
-
 def rss_item_text(item, tag):
     found = item.find(tag)
-    return found.text.strip() if found is not None and found.text else ""
-
-def atom_entry_text(entry, tag):
-    found = entry.find(f"{{http://www.w3.org/2005/Atom}}{tag}")
     return found.text.strip() if found is not None and found.text else ""
 
 def first_rss_link(item):
     link = rss_item_text(item, "link")
     return link.strip()
-
-def first_atom_link(entry):
-    found = entry.find("{http://www.w3.org/2005/Atom}link")
-    return found.attrib.get("href", "").strip() if found is not None else ""
 
 # ── Source 1: Remotive ────────────────────────────────────────────
 def fetch_remotive():
@@ -643,17 +631,23 @@ def fetch_hasjob():
     jobs = []
     try:
         xml_text = requests.get("https://hasjob.co/feed", timeout=15, headers=HEADERS).text
-        for entry in parse_atom_entries(xml_text):
-            title = clean_html(atom_entry_text(entry, "title"))
-            url = first_atom_link(entry) or atom_entry_text(entry, "id")
+        for entry in re.findall(r"<entry>(.*?)</entry>", xml_text, flags=re.S):
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", entry, flags=re.S)
+            link_match = re.search(r'<link[^>]*href="([^"]+)"', entry)
+            id_match = re.search(r"<id>(.*?)</id>", entry, flags=re.S)
+            loc_match = re.search(r"<location>(.*?)</location>", entry, flags=re.S)
+            content_match = re.search(r"<content[^>]*>(.*?)</content>", entry, flags=re.S)
+            published_match = re.search(r"<published>(.*?)</published>", entry, flags=re.S)
+            title = clean_html(html.unescape(title_match.group(1))) if title_match else ""
+            url = link_match.group(1).strip() if link_match else clean_html(id_match.group(1)) if id_match else ""
             if not title or not url:
                 continue
-            loc = clean_html(atom_entry_text(entry, "location")) or "India / Remote"
-            content = atom_entry_text(entry, "content")
+            loc = clean_html(html.unescape(loc_match.group(1))) if loc_match else "India / Remote"
+            content = html.unescape(content_match.group(1)) if content_match else ""
             company_match = re.search(r"<strong>\s*<a[^>]*>(.*?)</a>", content, flags=re.S)
             company = clean_html(company_match.group(1)) if company_match else "Hasjob startup"
             description = clean_html(content)
-            posted = atom_entry_text(entry, "published")[:10]
+            posted = clean_html(published_match.group(1))[:10] if published_match else ""
             text = f"{title} {company} {loc} {description} india startup".lower()
             if not contains_any(text, TECH_SOURCE_TERMS):
                 continue
