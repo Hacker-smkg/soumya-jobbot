@@ -363,13 +363,25 @@ def parse_rss_items(xml_text):
     for item in root.findall(".//item"):
         yield item
 
+def parse_atom_entries(xml_text):
+    root = ET.fromstring(xml_text)
+    yield from root.findall(".//{http://www.w3.org/2005/Atom}entry")
+
 def rss_item_text(item, tag):
     found = item.find(tag)
+    return found.text.strip() if found is not None and found.text else ""
+
+def atom_entry_text(entry, tag):
+    found = entry.find(f"{{http://www.w3.org/2005/Atom}}{tag}")
     return found.text.strip() if found is not None and found.text else ""
 
 def first_rss_link(item):
     link = rss_item_text(item, "link")
     return link.strip()
+
+def first_atom_link(entry):
+    found = entry.find("{http://www.w3.org/2005/Atom}link")
+    return found.attrib.get("href", "").strip() if found is not None else ""
 
 # ── Source 1: Remotive ────────────────────────────────────────────
 def fetch_remotive():
@@ -630,23 +642,19 @@ def fetch_gradworks():
 def fetch_hasjob():
     jobs = []
     try:
-        page = requests.get("https://hasjob.co/", timeout=15, headers=HEADERS).text
-        for block in re.findall(r'<a class="stickie".*?</a>', page, flags=re.S):
-            href_match = re.search(r'(?:data-href|href)="([^"]+)"', block)
-            title_match = re.search(r'<span class="headline">(.*?)</span>', block, flags=re.S)
-            company_match = re.search(r'<span class="annotation company-name">(.*?)</span>', block, flags=re.S)
-            loc_match = re.search(r'<span class="annotation top-left">(.*?)</span>', block, flags=re.S)
-            date_match = re.search(r'<span class="annotation top-right">(.*?)</span>', block, flags=re.S)
-            if not href_match or not title_match:
+        xml_text = requests.get("https://hasjob.co/feed", timeout=15, headers=HEADERS).text
+        for entry in parse_atom_entries(xml_text):
+            title = clean_html(atom_entry_text(entry, "title"))
+            url = first_atom_link(entry) or atom_entry_text(entry, "id")
+            if not title or not url:
                 continue
-            url = href_match.group(1)
-            if url.startswith("/"):
-                url = "https://hasjob.co" + url
-            title = clean_html(title_match.group(1))
+            loc = clean_html(atom_entry_text(entry, "location")) or "India / Remote"
+            content = atom_entry_text(entry, "content")
+            company_match = re.search(r"<strong>\s*<a[^>]*>(.*?)</a>", content, flags=re.S)
             company = clean_html(company_match.group(1)) if company_match else "Hasjob startup"
-            loc = clean_html(loc_match.group(1)) if loc_match else "India / Remote"
-            posted = clean_html(date_match.group(1)) if date_match else ""
-            text = f"{title} {company} {loc} india startup".lower()
+            description = clean_html(content)
+            posted = atom_entry_text(entry, "published")[:10]
+            text = f"{title} {company} {loc} {description} india startup".lower()
             if not contains_any(text, TECH_SOURCE_TERMS):
                 continue
             jobs.append(make_job(jid(url), title, company, url, f"📍 {loc}",
